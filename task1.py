@@ -1,59 +1,161 @@
+import time
+
 from pyspark import SparkContext
 import os
-import json
+from itertools import combinations
+import math
 import sys
 
-# os.environ['PYSPARK_PYTHON'] = '/Users/xinmengqiao/opt/anaconda3/envs/py36/bin/python'
-# os.environ['PYSPARK_DRIVER_PYTHON'] = '/Users/xinmengqiao/opt/anaconda3/envs/py36/bin/python'
+os.environ['PYSPARK_PYTHON'] = '/Users/xinmengqiao/opt/anaconda3/envs/py36/bin/python'
+os.environ['PYSPARK_DRIVER_PYTHON'] = '/Users/xinmengqiao/opt/anaconda3/envs/py36/bin/python'
+
+# input_file_path = '/Users/xinmengqiao/Desktop/DSCI 553/Homework/HW2/small2.csv'
 
 
-# input_file_path = '/Users/xinmengqiao/Desktop/DSCI 553/Homework/HW1/test_review.json'
+def find_candidate_singletons(candidate_items):
+    candidate_singletons = set()
+    for item in candidate_items:
+        for ele in item:
+            candidate_singletons.add(ele)
+    return candidate_singletons
 
 
-def task_1(reviewRDD):
-    res = {}
-
-    # Part A:
-    counts = reviewRDD.count()
-
-    # Part B:
-    counts_yr = reviewRDD.map(lambda rev: (rev['review_id'], rev['date']))\
-        .filter(lambda a: int(a[1][0:4]) == int(2018)).count()
-
-    # Part C:
-    counts_user = reviewRDD.map(lambda rev: (rev['user_id'], 1)).reduceByKey(lambda a, b: 1).count()
-
-    # Part D:
-    top_user_10 = reviewRDD.map(lambda rev: (rev['user_id'], 1)).reduceByKey(lambda a, b: a + b) \
-        .takeOrdered(10, lambda x: (-x[1], x[0]))
-
-    # Part E:
-    counts_business = reviewRDD.map(lambda rev: (rev['business_id'], 1)).reduceByKey(lambda a, b: 1).count()
-
-    # Part F:
-    top_business_10 = reviewRDD.map(lambda rev: (rev['business_id'], 1)).reduceByKey(lambda a, b: a + b) \
-        .takeOrdered(10, lambda x: (-x[1], x[0]))
+def find_candidate_elements(basket, candidate_element):
+    new = set()
+    for ele in candidate_element:
+        if ele in set(basket):
+            new.add(ele)
+    return new
 
 
-    res['n_review'] = counts
-    res['n_review_2018'] = counts_yr
-    res['n_user'] = counts_user
-    res['top10_user'] = top_user_10
-    res['n_business'] = counts_business
-    res['top10_business'] = top_business_10
+def find_frequent_kplet(data_collection, prev_candidate_element, k, threshold):
+    new_candidate = {}
+    new_frequent_items = set()
+    for basket in data_collection:
+        new_candidate_elements = find_candidate_elements(basket, prev_candidate_element)
+        for k_plet in combinations(sorted(new_candidate_elements), k):
+            new_candidate[k_plet] = new_candidate.get(k_plet, 0) + 1
+            if new_candidate[k_plet] >= threshold:
+                new_frequent_items.add(k_plet)
+    return new_frequent_items
 
-    return res
+
+def apriori(data_collection, support, total_baskets):
+    # list to store all candidate item sets
+    all_frequent = []
+
+    data_collection = list(data_collection)
+    # print(data_collection)
+    subset_len = len(data_collection)
+    threshold = math.ceil((subset_len / total_baskets) * support)
+    # print('threshold', threshold)
+
+    # First pass to count and generate frequent singletons first
+    items = {}
+    frequent_items = set()
+    for basket in data_collection:
+        for item in basket:
+            items[item] = items.get(item, 0) + 1
+            if items[item] >= threshold:
+                frequent_items.add(tuple([item]))
+
+    all_frequent.extend(sorted(frequent_items))
+
+    # candidate singletons for k=2
+    candidate_element = find_candidate_singletons(frequent_items)
+
+    # call function to calculate frequent k-plet, starting with k = 2
+    k = 2
+
+    prev_candidate_element = candidate_element
+    new_frequent = frequent_items
+
+    while new_frequent:
+        new_frequent = find_frequent_kplet(data_collection, prev_candidate_element, k, threshold)
+        prev_candidate_element = find_candidate_singletons(new_frequent)
+        k += 1
+        # print(new_frequent)
+        all_frequent.extend(sorted(new_frequent))
+
+    # print(all_frequent)
+
+    return all_frequent
 
 
-if __name__ == "__main__":
-    input_file_path = sys.argv[1]
-    output_file_path = sys.argv[2]
+def son_second_pass(data_chunk, first_pass_candidate):
+    check_count = {}
+    for basket in data_chunk:
+        for freq_cand in first_pass_candidate:
+            if set(freq_cand).issubset(set(basket)):
+                check_count[freq_cand] = check_count.get(freq_cand, 0) + 1
 
-    # read data
+    final_freq = []
+    for key in check_count:
+        final_freq.append((key, check_count[key]))
+    return final_freq
+
+
+def format_result(input_list):
+    output_list = []
+    temp_list = []
+    cur_len = len(input_list[0])
+    for item in input_list:
+        if len(item) > cur_len:
+            cur_len = len(item)
+            output_list.append(','.join(temp_list))
+            output_list.append('\n\n')
+            temp_list=[]
+        if cur_len == 1:
+            temp_list.append('(\'%s\')' % item[0])
+        else:
+            temp_list.append(str(item))
+    output_list.append(','.join(temp_list))
+    return ''.join(output_list)
+
+
+if __name__ == '__main__':
+    case_num = int(sys.argv[1])
+    support = int(sys.argv[2])
+    input_file_path = sys.argv[3]
+    output_file_path = sys.argv[4]
+    start = time.time()
+
     sc = SparkContext().getOrCreate()
-    reviewRDD = sc.textFile(input_file_path).map(lambda rev: json.loads(rev))
+    sc.setLogLevel("ERROR")
 
-    results = task_1(reviewRDD)
+    raw_rdd = sc.textFile(input_file_path)
+    file_title = raw_rdd.first()
+    rdd = raw_rdd.filter(lambda row: row != file_title).map(lambda x: x.split(','))
 
-    with open(output_file_path, 'w+') as outfile:
-        json.dump(results, outfile)
+    if case_num == 1:
+        final_rdd = rdd.map(lambda x: (x[0], [x[1]])).reduceByKey(lambda x, y: x + y).map(lambda x: list(set(x[1])))
+    else:
+        final_rdd = rdd.map(lambda x: (x[1], [x[0]])).reduceByKey(lambda x, y: x + y).map(lambda x: list(set(x[1])))
+
+    total_len = final_rdd.count()
+
+    # first pass candidate item sets
+    first_pass_can = final_rdd.mapPartitions(lambda x: apriori(x, support, total_len)) \
+        .distinct().sortBy(lambda x: (len(x), x)).collect()
+    # print(first_pass_can)
+    candidates = format_result(first_pass_can)
+
+    # second pass check frequent items
+    second_pass_freq = final_rdd.mapPartitions(lambda x: son_second_pass(x, first_pass_can)) \
+        .reduceByKey(lambda x, y: x + y).filter(lambda x: x[1] >= support) \
+        .sortBy(lambda x: (len(x[0]), x[0])).map(lambda x: x[0]).collect()
+
+    # print(second_pass_freq)
+    frequent_itemsets = format_result(second_pass_freq)
+
+    with open(output_file_path, 'w+') as output:
+        output.write('Candidates:\n')
+        output.write(candidates)
+        output.write('\n\n')
+        output.write('Frequent Itemsets:\n')
+        output.write(frequent_itemsets)
+
+    end = time.time()
+
+    duration = end - start
+    print('duration:', duration)
